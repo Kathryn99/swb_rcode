@@ -218,6 +218,132 @@ glimpse(db_mumbai)
 # the code till now has been verified and confirmed as running and bug free.
 ###########################################################################
 
+#below is the function regional_cases
+
+regional_cases = function(reported_cases, 
+                            target_folder, target_date,
+                            non_zero_points = 2, cores = 1,
+                            summary = TRUE,
+                            summary_dir,
+                            region_scale = "Region",
+                            all_regions_summary = TRUE,
+                            return_estimates = TRUE,
+                            max_plot = 10,
+                            ...) {
+    
+  ## Set input to data.table
+  reported_cases <- data.table::setDT(reported_cases)
+  
+  if (missing(target_date)) {
+    target_date <- as.character(max(reported_cases$date))
+  }
+  
+  if (missing(target_folder)) {
+    target_folder <- NULL
+  }
+  
+  futile.logger::flog.info("Reporting estimates using data up to: %s", target_date)
+  
+  
+  ## Check for regions more than required time points with cases
+  eval_regions <- data.table::copy(reported_cases)[,.(confirm = confirm > 0), by = c("region", "date")][,
+            .(confirm = sum(confirm, na.rm = TRUE)), by = "region"][confirm >= non_zero_points]$region
+  
+  eval_regions <- unique(eval_regions)
+  
+  ## Exclude zero regions
+  reported_cases <- reported_cases[!is.na(region)][region %in% eval_regions]
+  
+  futile.logger::flog.info("Producing estimates for: %s",
+          paste(eval_regions, collapse = ", "))
+  
+  ## regional pipelines
+  regions <- unique(reported_cases$region)
+  
+  ## Function to run the pipeline in a region
+  run_region <- function(target_region, 
+                         reported_cases,
+                         cores = cores,
+                         ...) { 
+    futile.logger::flog.info("Initialising estimates for: %s", target_region)
+    
+    data.table::setDTthreads(threads = 1)
+
+    if (!is.null(target_folder)) {
+      target_folder <- file.path(target_folder, target_region)
+    }
+    
+    regional_cases <- reported_cases[region %in% target_region][, region := NULL]
+    
+    out <- EpiNow2::epinow(
+      reported_cases = regional_cases,
+      target_folder = target_folder,
+      target_date = target_date, 
+      return_estimates = TRUE,
+      cores = cores,
+      ...)
+    
+     futile.logger::flog.info("Completed estimates for: %s", target_region)
+
+     return(out)
+    }
+  
+  safe_run_region <- purrr::safely(run_region)
+  
+  ## Run regions (make parallel using future::plan)
+  regional_out <- future.apply::future_lapply(regions, safe_run_region,
+                                              reported_cases = reported_cases,
+                                              cores = cores,
+                                              ...,
+                                              future.scheduling = Inf)
+  
+  regional_errors <- purrr::map(regional_out, ~ .$error)
+  names(regional_errors) <- regions
+  regional_errors <- purrr::compact(regional_errors)
+
+  if (length(regional_errors) != 0) {
+     futile.logger::flog.info("Runtime errors caught: ")
+     futile.logger::flog.info(regional_errors)
+    }
+
+  regional_out <- purrr::map(regional_out, ~ .$result)
+  names(regional_out) <- regions
+  
+  
+  if (summary) {
+    if (missing(summary_dir)) {
+      summary_dir <- NULL
+    }
+    safe_summary <- purrr::safely(regional_summary)
+    
+    summary_out <- safe_summary(regional_output = regional_out,
+                                summary_dir = summary_dir,
+                                reported_cases = reported_cases,
+                                region_scale = region_scale,
+                                all_regions = all_regions_summary,
+                                max_plot = max_plot)
+
+    if (!is.null(summary_out[[2]])) {
+      futile.logger::flog.info("Errors caught whilst generating summary statistics: ")
+      futile.logger::flog.info(summary_out[[2]])
+      }
+
+    summary_out <- summary_out[[1]]
+  }
+  
+  if (return_estimates) {
+    out <- list()
+    out$regional <- regional_out
+    
+    if (summary) {
+      out$summary <- summary_out
+    }
+    
+    return(out)
+  }else{
+    return(invisible(NULL))
+  }
+}
 
 
 
@@ -226,8 +352,7 @@ glimpse(db_mumbai)
 
 
 
-
-
+#below is the code we need to continue to transform for EpiNow2
 
 
 Rt_EpiNow2 <- estimates_mumbai_recent$estimates$summarised
